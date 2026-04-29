@@ -12,6 +12,7 @@ pipeline {
         DB_USERNAME = 'appuser'
         DB_PASSWORD = 'apppassword'
         MYSQL_ROOT_PASSWORD = 'rootpassword'
+        APP_HOST_PORT = '9090'
     }
 
     stages {
@@ -60,7 +61,21 @@ pipeline {
                       --health-retries=20 \
                       mysql:8.4
 
+                    echo "Waiting for MySQL init process to complete..."
+                    for i in $(seq 1 60); do
+                      if docker logs ${MYSQL_CONTAINER_NAME} 2>&1 | grep -q "MySQL init process done. Ready for start up"; then
+                        break
+                      fi
+                      sleep 2
+                    done
+                    if ! docker logs ${MYSQL_CONTAINER_NAME} 2>&1 | grep -q "MySQL init process done. Ready for start up"; then
+                      echo "MySQL init did not complete in time"
+                      docker logs ${MYSQL_CONTAINER_NAME}
+                      exit 1
+                    fi
+
                     echo "Waiting for MySQL to become healthy..."
+                    status=""
                     for i in $(seq 1 40); do
                       status=$(docker inspect --format='{{.State.Health.Status}}' ${MYSQL_CONTAINER_NAME})
                       if [ "$status" = "healthy" ]; then
@@ -73,6 +88,11 @@ pipeline {
                       fi
                       sleep 3
                     done
+                    if [ "$status" != "healthy" ]; then
+                      echo "MySQL did not become healthy in time"
+                      docker logs ${MYSQL_CONTAINER_NAME}
+                      exit 1
+                    fi
 
                     docker run -d \
                       --name ${APP_CONTAINER_NAME} \
@@ -82,8 +102,26 @@ pipeline {
                       -e DB_NAME=${DB_NAME} \
                       -e DB_USERNAME=${DB_USERNAME} \
                       -e DB_PASSWORD=${DB_PASSWORD} \
-                      -p 9090:9090 \
+                      -p ${APP_HOST_PORT}:9090 \
                       ${IMAGE_NAME}:latest
+
+                    echo "Waiting for app startup..."
+                    for i in $(seq 1 40); do
+                      if docker logs ${APP_CONTAINER_NAME} 2>&1 | grep -q "Started CicdApplication"; then
+                        break
+                      fi
+                      if [ "$(docker inspect --format='{{.State.Running}}' ${APP_CONTAINER_NAME})" != "true" ]; then
+                        echo "App container exited early"
+                        docker logs ${APP_CONTAINER_NAME}
+                        exit 1
+                      fi
+                      sleep 3
+                    done
+                    if ! docker logs ${APP_CONTAINER_NAME} 2>&1 | grep -q "Started CicdApplication"; then
+                      echo "App did not report startup in time"
+                      docker logs ${APP_CONTAINER_NAME}
+                      exit 1
+                    fi
                 '''
             }
         }
